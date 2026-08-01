@@ -1,158 +1,155 @@
 """
 rule_engine.py
 --------------
-Two-phase rule engine:
+Two-phase rule engine.
 
-1. Absolute Rules: If any rule fires, returns a final output dict immediately
-   (skip LLM entirely). First match wins, checked in order.
+Phase 1 — Absolute Rules
+    Deterministic checks that produce a final prediction without calling Gemini.
+    First match wins. Checks are ordered from highest to lowest confidence.
 
-2. Preference Signals: If no absolute rule fires, returns None for the output
-   dict but mutates ctx["preference_signals"] in-place with priority_bias and
-   reason_hint strings (multiple signals stack; bias is clamped at -0.50).
+Phase 2 — Preference Signals
+    Behavioral signals that enrich the context dict (mutating preference_signals)
+    to bias the LLM decision. They do NOT force an outcome; the LLM remains free
+    to override a negative bias if the message content is genuinely urgent.
 """
 
+from __future__ import annotations
 import re
-from collections import defaultdict
+from models import RoutingPrediction, CONF_MIN, CONF_MAX
 
 
-# ── Absolute rule helpers ────────────────────────────────────────────────────
+# ── Phrase lists ──────────────────────────────────────────────────────────────
 
-_PROMPT_INJECTION_PHRASES = [
+_INJECTION_PHRASES = [
     "ignore previous",
-    "mark this as notify",
+    "ignore all previous",
     "override routing",
     "disregard instructions",
-    "ignore all previous",
-    "ignore previous routing",
+    "mark this as notify",
+    "mark as notify",
     "set action=notify",
+    "action=notify",
     "routing override",
     "system note for the notification router",
     "internal router metadata",
     "assistant instruction",
     "always mark this as notify",
-    "always mark as notify",
     "ignore sender risk",
     "mark notify",
+    "notification router:",
+    "router instruction",
 ]
 
-_OTP_TERMS = ["otp", "password", "6 digit code", "login code", "6-digit code"]
+_OTP_TERMS = [
+    "otp", "6 digit code", "6-digit code", "login code",
+    "verification code", "one time password",
+]
+
 _PRESSURE_TERMS = [
-    "blocked",
-    "suspended",
-    "verify now",
-    "expires today",
-    "account block",
-    "profile will be",
-    "access will be",
-    "account may be",
-    "account may get",
-    "band ho jayega",
-    "block ho jayega",
-    "locked",
+    "blocked", "suspended", "verify now", "expires today",
+    "account block", "account will be blocked", "account may be blocked",
+    "profile will be restricted", "profile will be",
+    "access will be suspended", "access will expire",
+    "band ho jayega", "block ho jayega", "locked",
+    "permanently block", "permanent block",
 ]
 
 
-def _text_lower(ctx: dict) -> str:
-    text = ctx.get("message_text", "") or ""
-    summary = ctx.get("media_summary", "") or ""
-    return (text + " " + summary).lower()
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _text(ctx: dict) -> str:
+    """Combined lowercased text + media summary for pattern matching."""
+    t = (ctx.get("text") or "").lower()
+    media = ctx.get("media") or {}
+    s = (media.get("summary") or "").lower()
+    return t + " " + s
 
 
-def _contains_any(haystack: str, needles: list[str]) -> bool:
+def _contains(haystack: str, needles: list[str]) -> bool:
     return any(n in haystack for n in needles)
 
 
-def _final_output(ctx: dict, action: str, message_type: str, reason: str,
-                  confidence: float) -> dict:
-    return {
-        "message_id": ctx["message_id"],
-        "action": action,
-        "message_type": message_type,
-        "reason": reason,
-        "confidence": confidence,
-        "evidence_message_ids": "none",
-        "_rule_fired": True,
-    }
+def _make_prediction(
+    ctx: dict,
+    action: str,
+    message_type: str,
+    reason: str,
+    confidence: float,
+) -> RoutingPrediction:
+    return RoutingPrediction(
+        message_id=ctx["message_id"],
+        action=action,
+        message_type=message_type,
+        reason=reason,
+        confidence=confidence,
+        evidence_message_ids="none",
+        rule_fired=True,
+    )
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+def _safe_int(val, default: int = 0) -> int:
+    try:
+        return int(val) if val not in (None, "") else default
+    except (ValueError, TypeError):
+        return default
+
+
+# ── Public class ──────────────────────────────────────────────────────────────
 
 class RuleEngine:
     """
-    Usage:
-        result = engine.apply_absolute_rules(ctx)
-        if result is not None:
-            # use result directly, skip LLM
-        else:
-            engine.apply_preference_signals(ctx, history_events)
-            # pass ctx to LLM
+    Stateless rule engine. Pass a ContextBuilder instance so that
+    prior-relationship checks can query message_history.
     """
 
     def __init__(self, context_builder=None):
-        """context_builder is passed so we can access business / history data."""
         self.cb = context_builder
 
     # ------------------------------------------------------------------
     # Phase 1 — Absolute Rules
     # ------------------------------------------------------------------
 
-    def apply_absolute_rules(self, ctx: dict) -> dict | None:
-        """Returns final output dict if a rule fires, else None."""
-        text_l = _text_lower(ctx)
+    def apply_absolute_rules(self, ctx: dict) -> RoutingPrediction | None:
+        """
+        Check absolute rules in order. Returns a RoutingPrediction on first match,
+        or None if no rule fires (message should proceed to LLM).
+        """
+        text_l = _text(ctx)
 
-        # Rule 1: Prompt injection
-        if _contains_any(text_l, _PROMPT_INJECTION_PHRASES):
-            return _final_output(
-                ctx,
-                action="mute",
-                message_type="scam",
-                reason="The message attempts to manipulate the routing system.",
-                confidence=0.95,
+        # ── Rule 1: Prompt injection ─────────────────────────────────
+        if _contains(text_l, _INJECTION_PHRASES):
+            return _make_prediction(
+                ctx, "mute", "scam",
+                "The message attempts to manipulate the notification routing system.",
+                0.95,
             )
 
-        # Rule 2: Business domain mismatch
+        # ── Rule 2: Business domain mismatch ─────────────────────────
         if ctx.get("conversation_type") == "business":
             biz = ctx.get("business") or {}
-            official = biz.get("official_domain", "") or ""
-            sender_domain = biz.get("domain_used_by_sender", "") or ""
-            domain_age = biz.get("domain_age_days", 9999)
-            # Mismatch: official domain exists, sender domain differs, and domain is new
-            if (
-                official
-                and sender_domain
-                and official.strip().lower() != sender_domain.strip().lower()
-                and domain_age < 365
-            ):
-                return _final_output(
-                    ctx,
-                    action="mute",
-                    message_type="scam",
-                    reason="The sender domain does not match the verified business domain.",
-                    confidence=0.92,
+            official = (biz.get("official_domain") or "").strip().lower()
+            sender = (biz.get("sender_domain") or "").strip().lower()
+            age = biz.get("sender_domain_age_days", 9999)
+            # Only fire when: official domain exists, sender differs, and domain is <1 year old
+            if official and sender and official != sender and age < 365:
+                return _make_prediction(
+                    ctx, "mute", "scam",
+                    "The sender domain does not match the verified business domain.",
+                    0.92,
                 )
 
-        # Rule 3: OTP/scam pattern in personal messages
+        # ── Rule 3: OTP/account-lock scam in personal messages ───────
         if ctx.get("conversation_type") == "personal":
-            has_otp = _contains_any(text_l, _OTP_TERMS)
-            has_pressure = _contains_any(text_l, _PRESSURE_TERMS)
-            if has_otp and has_pressure:
-                # Check for prior relationship with sender
-                sender = ctx.get("sender_user_id", "")
-                user_id = ctx.get("user_id", "") if hasattr(ctx, "get") else ""
-                has_prior = self._has_prior_relationship(ctx)
-                if not has_prior:
-                    return _final_output(
-                        ctx,
-                        action="mute",
-                        message_type="scam",
-                        reason=(
-                            "This is the first message from the sender and it asks "
-                            "for sensitive verification."
-                        ),
-                        confidence=0.92,
+            if _contains(text_l, _OTP_TERMS) and _contains(text_l, _PRESSURE_TERMS):
+                if not self._has_prior_relationship(ctx):
+                    return _make_prediction(
+                        ctx, "mute", "scam",
+                        "This is the first message from the sender and it requests "
+                        "sensitive verification under pressure.",
+                        0.92,
                     )
 
-        return None
+        return None  # No absolute rule matched
 
     # ------------------------------------------------------------------
     # Phase 2 — Preference Signals
@@ -165,47 +162,53 @@ class RuleEngine:
         message_events: dict,
     ) -> None:
         """
+        Compute stacked priority_bias and reason_hint, clamped at −0.50.
         Mutates ctx['preference_signals'] in-place.
-        message_events is the dict keyed by (user_id, message_id).
+
+        Args:
+            ctx:             Message context dict (will be mutated).
+            message_history: Full historical message list from ContextBuilder.
+            message_events:  Dict keyed by (user_id, message_id).
         """
         bias = 0.0
         hints: list[str] = []
 
-        user_id = ctx.get("user_id", "") if isinstance(ctx, dict) else ""
+        user_id = ctx.get("user_id", "")
+        sender = ctx.get("sender_user_id", "") or ""
+        group = ctx.get("group") or {}
+        biz = ctx.get("business") or {}
 
         # Signal 1: Group muted by user
-        group = ctx.get("group") or {}
         if group.get("muted_by_user"):
             bias -= 0.35
             hints.append("User has muted this group.")
 
-        # Signal 2: Promotions opted out
-        biz = ctx.get("business") or {}
-        if biz.get("promotions_opted_out_at"):
+        # Signal 2: Promotion opt-out from this business
+        if biz.get("promotions_opted_out"):
             bias -= 0.30
             hints.append("User opted out of promotions from this business.")
 
-        # Signal 3 & 4: Same-sender history from message_history
-        sender = ctx.get("sender_user_id", "") or ""
-        group_id = ctx.get("group_id", "") or ""
-        business_id = ctx.get("business_id", "") or ""
+        # Signals 3 & 4: Look at same-sender / same-business history
+        business_id = ctx.get("business_id", "") or (biz and "") or ""
+        # Infer business_id from context
+        raw_bid = ""
+        for k in ("business_id",):
+            raw_bid = ctx.get(k, "") or ""
+        biz_name = biz.get("name", "") if biz else ""
 
         muted_count = 0
         reported_count = 0
-
-        for hist_msg in message_history:
-            if hist_msg.get("user_id") != user_id:
+        for hist in message_history:
+            if hist.get("user_id") != user_id:
                 continue
-            # Match same sender (personal / group) or same business
-            same_sender = (sender and hist_msg.get("sender_user_id") == sender)
-            same_biz = (business_id and hist_msg.get("business_id") == business_id)
+            same_sender = sender and hist.get("sender_user_id") == sender
+            same_biz = raw_bid and hist.get("business_id") == raw_bid
             if not (same_sender or same_biz):
                 continue
-
-            event = message_events.get((user_id, hist_msg["message_id"]), {})
-            if _safe_int(event.get("muted_after_message")):
+            ev = message_events.get((user_id, hist["message_id"]), {})
+            if _safe_int(ev.get("muted_after_message")):
                 muted_count += 1
-            if _safe_int(event.get("message_reported")):
+            if _safe_int(ev.get("message_reported")):
                 reported_count += 1
 
         if muted_count >= 2:
@@ -226,7 +229,7 @@ class RuleEngine:
             bias -= 0.15
             hints.append("Highly forwarded message, likely low-value broadcast.")
 
-        # Clamp total bias
+        # Clamp
         bias = max(bias, -0.50)
 
         ctx["preference_signals"] = {
@@ -239,29 +242,14 @@ class RuleEngine:
     # ------------------------------------------------------------------
 
     def _has_prior_relationship(self, ctx: dict) -> bool:
-        """
-        Check if the receiver has any prior interaction with the sender.
-        Uses message_history keyed lookups from the context_builder if available.
-        """
+        """Check message_history for any prior exchange with this sender."""
         if self.cb is None:
             return False
-
-        user_id = ctx.get("user_id", "")
-        sender = ctx.get("sender_user_id", "")
+        uid = ctx.get("user_id", "")
+        sender = ctx.get("sender_user_id", "") or ""
         if not sender:
             return False
-
-        for hist_msg in self.cb.message_history:
-            if (
-                hist_msg.get("user_id") == user_id
-                and hist_msg.get("sender_user_id") == sender
-            ):
-                return True
-        return False
-
-
-def _safe_int(val, default: int = 0) -> int:
-    try:
-        return int(val) if val not in (None, "") else default
-    except (ValueError, TypeError):
-        return default
+        return any(
+            h.get("user_id") == uid and h.get("sender_user_id") == sender
+            for h in self.cb.message_history
+        )

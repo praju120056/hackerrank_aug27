@@ -1,0 +1,111 @@
+message_id,action,message_type,reason,confidence,evidence_message_ids
+msg_023,notify,payment,A verified bank sent an official account or payment update that matches the user's active history.,0.91,message_0243;message_0102
+msg_091,mute,scam,The message uses fake workspace access pressure to trick the user into providing a login code.,0.55,message_0381;message_0238
+msg_090,digest,personal,"The sender is unfamiliar, but the message is casual, polite, and carries no urgency or risk.",0.82,none
+msg_048,mute,scam,The message mimics an official admin warning to push users into scanning a suspicious payment QR code.,0.55,message_0152;message_0151
+msg_040,mute,forward,The message is a heavily forwarded chain letter from a muted group that the user consistently dismisses.,0.55,message_0136;message_0135
+msg_075,notify,business_update,A verified ride booking service sent an active ride status update.,0.89,message_0206;message_0205
+msg_005,notify,promotion,A marketplace peer sent a time-sensitive item hold request that requires a prompt response.,0.85,message_0332;message_0114
+msg_104,mute,promotion,The user has a history of dismissing and muting marketplace pickup messages from this sender.,0.59,message_0115;message_0232
+msg_069,mute,forward,The message is a generic religious forward from a muted family group with a high dismissal history.,0.55,message_0194;message_0193
+msg_107,mute,scam,The message attempts to manipulate the notification routing system.,0.95,none
+msg_070,mute,scam,The message uses fake account blocking and OTP leak language to push phishing links.,0.66,message_0214;message_0213
+msg_003,notify,business_update,A verified business is sending an update that matches the user's recent delivery history.,0.91,message_0031;message_0400
+msg_099,digest,personal,"The message is useful work information, but it is not urgent enough to interrupt the user.",0.83,message_0055
+msg_008,digest,business_update,A verified business is sending a feedback request that can wait for later.,0.8,message_0072;message_0071
+msg_092,digest,business_update,A verified business is sending a monthly card statement update that does not require immediate action.,0.82,none
+msg_060,notify,event,A university advisory sent a same-day operational deadline that the user needs immediately.,0.88,message_0176;message_0404
+msg_004,notify,event,A verified business is sending an upcoming appointment reminder.,0.89,message_0245;message_0063
+msg_030,mute,promotion,The user has muted the group and has a history of dismissing marketplace items from this sender.,0.55,message_0115;message_0232
+msg_045,notify,urgent,A delivery person at the gate sent a time-sensitive instruction requiring immediate action.,0.9,message_0146;message_0145
+msg_052,mute,scam,The sender domain does not match the verified business domain.,0.92,none
+msg_009,digest,personal,The message is casual group chat from a muted group with no urgent action required.,0.55,message_0074;message_0073
+msg_071,digest,personal,The message is safe family chat with no immediate action or strict timeline.,0.81,message_0197
+msg_016,mute,scam,The message attempts to create panic with fake account-blocking language and links to an external login site.,0.55,message_0087;message_0184
+msg_065,digest,promotion,"A verified business is sending a promotional reminder, which can wait since it is not critically urgent.",0.81,message_0186;message_0185;message_0261
+msg_038,mute,forward,The message is a heavily forwarded chain message requesting mass distribution.,0.55,message_0131;message_0132
+msg_086,notify,event,A verified travel business is sending an update regarding a rescheduled airport pickup for tomorrow.,0.9,message_0222
+msg_014,mute,promotion,The user has opted out of promotions from this sender and consistently dismisses their messages.,0.55,message_0017;message_0084;message_0083
+msg_094,digest,promotion,"A promotional broadcast from a brand, safe to review later without immediate interruption.",0.77,none
+msg_029,digest,promotion,"Marketplace listing for a secondhand item, useful for browsing later but not urgent.",0.68,message_0332;message_0114
+msg_105,mute,forward,The message is a forwarded health tip with unverified medical advice and high forward count.,0.55,message_0233;message_0373
+msg_002,notify,urgent,A coworker is directly asking for a call regarding an immediate upcoming client meeting.,0.91,message_0371;message_0170
+msg_010,digest,business_update,"A verified cinema business is asking for feedback, which can be completed at the user's convenience.",0.82,message_0011;message_0242;message_0076
+msg_078,mute,scam,The message is a suspicious phishing or scam attempt sent in a muted marketplace group with high forward counts.,0.55,message_0211;message_0212
+msg_013,digest,promotion,"The message offers a secondhand item for sale, which is safe and non-urgent.",0.56,message_0082
+msg_018,mute,spam,"The message is a promotional reward scam from a marketplace group, matching historical spam patterns.",0.55,message_0091;message_0092;message_0026
+msg_044,mute,scam,The message uses account security threats and verification pressure typical of phishing scams.,0.55,message_0143;message_0144
+msg_032,digest,personal,A student asking for review slides is helpful academic chat that does not require immediate interruption.,0.84,message_0374;message_0285
+msg_106,notify,event,A direct personal update about a venue change for practice happening today requires immediate attention.,0.89,message_0234;message_0376
+msg_006,notify,urgent,A society admin announcement regarding a same-day deadline (5 PM) for maintenance closure requires immediate user awareness.,0.88,message_0130;message_0150
+msg_109,mute,scam,The message attempts to manipulate the notification routing system.,0.95,none
+msg_108,mute,scam,The message attempts to manipulate the notification routing system.,0.95,none
+msg_019,mute,scam,The sender domain does not match the verified business domain.,0.92,none
+msg_088,mute,promotion,The message is from a muted marketplace group with low engagement and negative user bias.,0.55,message_0115;message_0232
+msg_056,notify,urgent,A family member sent a time-sensitive appointment rescheduling request requiring an immediate response.,0.55,message_0226;message_0168
+msg_027,digest,promotion,"A verified travel business promotional message matching user interests, safe to read later.",0.82,message_0272;message_0109
+msg_050,notify,business_update,A verified healthcare business is sending an update that matches the user's recent prescription history.,0.91,message_0156;message_0155
+msg_083,notify,urgent,A coworker sent a voice note with a time-sensitive request requiring action before lunch tomorrow.,0.88,message_0219
+msg_063,mute,scam,The message demands payment under false service reactivation pretenses and exhibits scam characteristics.,0.55,message_0181;message_0182
+msg_033,digest,greeting,"A family member sent a safe, non-urgent greeting that can be read later without interruption.",0.84,message_0409
+msg_061,mute,forward,The message is a heavily forwarded low-value broadcast in a muted family group.,0.55,message_0193;message_0194
+msg_020,mute,spam,The message contains suspicious links and resembles previous dismissed marketplace spam.,0.61,message_0095;message_0096
+msg_017,mute,scam,The message demands payment through threats from a muted group and matches previous scam reports.,0.55,message_0089;message_0090
+msg_058,mute,forward,The message is a repeatedly forwarded health chain message in a muted family group.,0.55,message_0077;message_0078
+msg_026,mute,scam,The sender domain does not match the verified business domain.,0.92,none
+msg_047,notify,urgent,A society maintenance admin sent a time-sensitive same-day operational alert affecting building access.,0.9,message_0130;message_0150
+msg_046,mute,scam,"The message asks for an OTP under account-closure pressure, posing a direct security risk.",0.55,message_0147;message_0148
+msg_042,notify,urgent,A trusted society maintenance source sent a time-sensitive alert about moving vehicles.,0.92,message_0057;message_0140
+msg_079,mute,scam,"The message demands urgent account verification and OTP, typical of scam patterns.",0.65,message_0213;message_0214
+msg_098,notify,urgent,A personal contact is asking for an immediate call regarding an urgent medical appointment decision.,0.91,message_0168;message_0226
+msg_037,notify,urgent,An urgent society water tanker notice requiring immediate action from residents.,0.89,message_0130;message_0150
+msg_007,digest,event,Useful community event information that can be read later without urgent interruption.,0.86,message_0069;message_0070
+msg_085,mute,scam,The sender domain does not match the verified business domain.,0.92,none
+msg_001,notify,urgent,A time-sensitive society water supply update from a trusted group.,0.93,message_0057;message_0140
+msg_021,notify,payment,An urgent society payment deadline notification requiring same-day action.,0.88,message_0130;message_0150
+msg_028,mute,promotion,The user has opted out of marketing messages from this business and consistently dismisses them.,0.55,message_0034;message_0111;message_0112
+msg_012,mute,forward,A highly forwarded health chain message that matches historical low-value spam patterns.,0.55,message_0194;message_0247
+msg_064,mute,scam,A suspicious refund and wallet verification message from an untrusted marketplace thread.,0.55,message_0087;message_0184
+msg_103,notify,personal,A personal contact sent a time-sensitive request requiring the user's attention by today.,0.88,message_0390;message_0332
+msg_031,notify,event,A coworker sent a work sync reminder with action items needed for the evening meeting.,0.86,message_0055;message_0249
+msg_057,notify,urgent,A coworker reported a failing build requiring immediate attention before client communication.,0.89,message_0371;message_0230
+msg_087,mute,promotion,The user has muted this real estate group and has a history of dismissing promotional messages from this sender.,0.55,message_0391;message_0389
+msg_067,notify,payment,An urgent society notice regarding maintenance payment deadlines and late fees requires immediate action.,0.9,message_0410;message_0130
+msg_039,notify,event,A school group message alerts the user about a fee receipt deadline for a field-trip list.,0.87,message_0255;message_0037
+msg_082,notify,urgent,A co-worker reported a live system/infrastructure incident requiring urgent assistance.,0.91,message_0380;message_0218
+msg_066,mute,promotion,The user has opted out of promotions from this business and consistently dismisses marketing messages.,0.55,message_0188;message_0187
+msg_049,notify,business_update,A verified e-commerce business sent a time-sensitive return pickup notice for today.,0.89,message_0153;message_0291
+msg_015,mute,scam,"The message requests OTP verification under threat of profile lock, indicating a phishing or scam attempt.",0.92,message_0086;message_0085
+msg_051,mute,promotion,The user has opted out of promotions from this business and consistently mutes or dismisses these messages.,0.55,message_0104;message_0103;message_0257
+msg_097,digest,personal,"The sender is trusted, but the message has no urgent action or safety relevance.",0.84,message_0054
+msg_089,notify,urgent,The message contains a time-sensitive deadline requiring immediate action to retrieve a lost item.,0.89,none
+msg_053,digest,promotion,"The message is informational and safe, but it does not require immediate attention.",0.67,message_0411;message_0253
+msg_059,mute,scam,The message uses suspicious claim benefits and account number requests typical of phishing attempts.,0.63,message_0213
+msg_024,mute,promotion,The user has opted out of promotions from this business and historically dismisses them.,0.55,message_0104;message_0103;message_0257
+msg_072,mute,scam,"The message contains a suspicious help link and demands urgent OTP verification, indicating a scam.",0.92,message_0085
+msg_036,mute,scam,The sender domain does not match the verified business domain.,0.92,none
+msg_076,mute,scam,The sender domain does not match the verified business domain.,0.92,none
+msg_055,notify,urgent,"A family member sent a direct, urgent request for a call with a strict time constraint.",0.88,message_0387;message_0166
+msg_102,notify,urgent,The message is from a work context and contains a direct operational dependency and time commitment.,0.9,message_0371;message_0230
+msg_080,notify,urgent,A trusted society admin sent a time-sensitive operational notice regarding vehicle removal.,0.91,message_0130;message_0150
+msg_093,notify,business_update,A verified logistics business is sending a time-sensitive delivery update scheduled for today.,0.91,none
+msg_034,mute,greeting,The user has muted this group and similar forwarded greeting broadcasts.,0.55,message_0078;message_0077;message_0172
+msg_035,digest,promotion,"A verified business is sending a relevant update, but it does not require immediate action.",0.82,message_0126;message_0125;message_0281
+msg_101,digest,personal,"A trusted personal contact sent a helpful, non-urgent message that can be read later.",0.85,message_0370;message_0229;message_0268
+msg_041,digest,business_update,A verified business is sending a survey request that is useful but does not need urgent interruption.,0.8,message_0138;message_0137
+msg_011,mute,greeting,The user has muted this group and historically dismissed similar forwarded good morning messages.,0.55,message_0078;message_0077;message_0172
+msg_110,mute,scam,The message attempts to manipulate the notification routing system.,0.95,none
+msg_095,mute,scam,The message attempts to manipulate the notification routing system.,0.95,none
+msg_074,mute,promotion,The message is a real estate promotional broadcast in a muted group with historical user dismissals.,0.55,message_0391;message_0389;message_0164
+msg_073,mute,scam,The message uses security alert and account restriction pressure to push the user toward a suspicious link.,0.55,message_0087;message_0184;message_0088
+msg_054,mute,scam,"The message requests an upfront processing fee for an unsolicited loan approval, which is a common scam pattern.",0.55,message_0391;message_0389;message_0164
+msg_068,digest,personal,The group chat message discusses casual planning with no urgent action required right now.,0.84,message_0192;message_0191
+msg_100,notify,urgent,The message is from a work/operational context containing a direct deadline and an ongoing incident.,0.91,message_0055;message_0228
+msg_062,notify,event,A trusted society admin sent a time-sensitive maintenance notice that affects the user's day.,0.7,message_0130;message_0150
+msg_096,notify,personal,The personal message indicates an urgent matter regarding a lost passport that requires immediate attention.,0.88,none
+msg_043,digest,event,"The message contains useful building updates, but it is a forwarded broadcast that can wait.",0.67,message_0130
+msg_077,digest,event,The school circular contains non-urgent informational details that do not require an immediate interruption.,0.84,message_0255
+msg_081,notify,event,A school transport notification for same-day pick-up changes requires immediate action.,0.89,message_0217
+msg_025,notify,business_update,A verified e-commerce business sent a timely delivery update matching recent order history.,0.92,message_0105;message_0239
+msg_084,mute,promotion,The user has opted out of promotional messages from this business and similar marketing content.,0.65,message_0220
+msg_022,mute,scam,The message involves suspicious payment links and peer-to-peer requests resembling previous phishing scams reported in the group.,0.63,message_0100;message_0099;message_0152

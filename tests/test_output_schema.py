@@ -1,30 +1,24 @@
 """
 test_output_schema.py
 ---------------------
-Validates the structure and content of output.csv.
+Validates output.csv structure and content against the submission contract.
+Run this AFTER python code/main.py has produced output.csv.
 """
 
 import csv
-import os
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
+sys.path.insert(0, str(REPO_ROOT / "code"))
+
+from models import VALID_ACTIONS, VALID_MESSAGE_TYPES, OUTPUT_COLUMNS
+
 OUTPUT_PATH = REPO_ROOT / "output.csv"
 MESSAGES_PATH = REPO_ROOT / "dataset" / "messages.csv"
 
-VALID_ACTIONS = {"notify", "digest", "mute"}
-VALID_TYPES = {
-    "personal", "urgent", "event", "payment", "business_update",
-    "promotion", "greeting", "forward", "spam", "scam", "unknown",
-}
-REQUIRED_COLUMNS = [
-    "message_id", "action", "message_type", "reason",
-    "confidence", "evidence_message_ids",
-]
 
-
-def load_csv(path):
+def _load(path: Path) -> list[dict]:
     with open(path, encoding="utf-8", newline="") as f:
         return list(csv.DictReader(f))
 
@@ -34,123 +28,95 @@ def test_output_exists():
     print("[PASS] output.csv exists")
 
 
-def test_required_columns():
-    rows = load_csv(OUTPUT_PATH)
-    assert rows, "output.csv is empty"
-    cols = list(rows[0].keys())
-    for col in REQUIRED_COLUMNS:
-        assert col in cols, f"Missing column: {col}"
-    print(f"[PASS] All required columns present: {REQUIRED_COLUMNS}")
-
-
-def test_column_order():
+def test_header_order():
     with open(OUTPUT_PATH, encoding="utf-8") as f:
         header = f.readline().strip().split(",")
-    assert header == REQUIRED_COLUMNS, (
-        f"Column order mismatch.\n  Expected: {REQUIRED_COLUMNS}\n  Got:      {header}"
+    assert header == OUTPUT_COLUMNS, (
+        f"Column order mismatch.\n  Expected: {OUTPUT_COLUMNS}\n  Got:      {header}"
     )
     print("[PASS] Column order matches specification")
 
 
 def test_one_row_per_message_id():
-    messages = load_csv(MESSAGES_PATH)
-    output = load_csv(OUTPUT_PATH)
-    expected_ids = {m["message_id"] for m in messages}
-    output_ids = [r["message_id"] for r in output]
+    messages = _load(MESSAGES_PATH)
+    output = _load(OUTPUT_PATH)
+    expected = {m["message_id"] for m in messages}
+    got_ids = [r["message_id"] for r in output]
 
-    missing = expected_ids - set(output_ids)
+    missing = expected - set(got_ids)
     assert not missing, f"Missing message_ids: {missing}"
 
-    duplicates = {mid for mid in output_ids if output_ids.count(mid) > 1}
-    assert not duplicates, f"Duplicate message_ids: {duplicates}"
+    dups = {mid for mid in got_ids if got_ids.count(mid) > 1}
+    assert not dups, f"Duplicate message_ids: {dups}"
 
-    assert len(output) == len(expected_ids), (
-        f"Row count mismatch: expected {len(expected_ids)}, got {len(output)}"
+    assert len(output) == len(expected), (
+        f"Row count: expected {len(expected)}, got {len(output)}"
     )
     print(f"[PASS] Exactly one row per message_id ({len(output)} rows)")
 
 
-def test_confidence_range():
-    rows = load_csv(OUTPUT_PATH)
-    for row in rows:
-        conf_str = row.get("confidence", "")
-        assert conf_str != "", f"Empty confidence for {row['message_id']}"
-        conf = float(conf_str)
-        assert 0.0 <= conf <= 1.0, (
-            f"Confidence out of range for {row['message_id']}: {conf}"
-        )
-    print("[PASS] All confidence values in [0, 1]")
-
-
 def test_valid_action_values():
-    rows = load_csv(OUTPUT_PATH)
-    for row in rows:
-        action = row.get("action", "")
-        assert action in VALID_ACTIONS, (
-            f"Invalid action '{action}' for {row['message_id']}"
+    for row in _load(OUTPUT_PATH):
+        assert row["action"] in VALID_ACTIONS, (
+            f"Invalid action '{row['action']}' for {row['message_id']}"
         )
-    print(f"[PASS] All action values valid: {VALID_ACTIONS}")
+    print(f"[PASS] All action values are valid: {VALID_ACTIONS}")
 
 
 def test_valid_message_type_values():
-    rows = load_csv(OUTPUT_PATH)
-    for row in rows:
-        mt = row.get("message_type", "")
-        assert mt in VALID_TYPES, (
-            f"Invalid message_type '{mt}' for {row['message_id']}"
+    for row in _load(OUTPUT_PATH):
+        assert row["message_type"] in VALID_MESSAGE_TYPES, (
+            f"Invalid message_type '{row['message_type']}' for {row['message_id']}"
         )
-    print(f"[PASS] All message_type values valid")
+    print("[PASS] All message_type values are valid")
 
 
-def test_no_blank_reason():
-    rows = load_csv(OUTPUT_PATH)
-    for row in rows:
-        reason = row.get("reason", "").strip()
-        assert reason, f"Blank reason for {row['message_id']}"
+def test_confidence_in_range():
+    for row in _load(OUTPUT_PATH):
+        conf_str = row.get("confidence", "")
+        assert conf_str != "", f"Empty confidence for {row['message_id']}"
+        conf = float(conf_str)
+        assert 0.0 <= conf <= 1.0, f"Confidence out of range for {row['message_id']}: {conf}"
+    print("[PASS] All confidence values in [0, 1]")
+
+
+def test_non_empty_reason():
+    for row in _load(OUTPUT_PATH):
+        assert row.get("reason", "").strip(), f"Blank reason for {row['message_id']}"
     print("[PASS] All reason fields are non-empty")
 
 
 def test_evidence_ids_format():
-    rows = load_csv(OUTPUT_PATH)
-    for row in rows:
+    for row in _load(OUTPUT_PATH):
         eids = row.get("evidence_message_ids", "").strip()
-        assert eids != "", f"Empty evidence_message_ids for {row['message_id']}"
-        # Must be "none" or semicolon-separated non-empty strings
+        assert eids, f"Empty evidence_message_ids for {row['message_id']}"
         if eids != "none":
             parts = [p.strip() for p in eids.split(";")]
             for p in parts:
-                assert p, (
-                    f"Empty part in evidence_message_ids for {row['message_id']}: {eids}"
-                )
+                assert p, f"Empty part in evidence_message_ids for {row['message_id']}: {eids}"
     print("[PASS] All evidence_message_ids values are valid")
 
 
 if __name__ == "__main__":
     errors = []
     tests = [
-        test_output_exists,
-        test_required_columns,
-        test_column_order,
-        test_one_row_per_message_id,
-        test_confidence_range,
-        test_valid_action_values,
-        test_valid_message_type_values,
-        test_no_blank_reason,
-        test_evidence_ids_format,
+        test_output_exists, test_header_order, test_one_row_per_message_id,
+        test_valid_action_values, test_valid_message_type_values,
+        test_confidence_in_range, test_non_empty_reason, test_evidence_ids_format,
     ]
-    for test_fn in tests:
+    for fn in tests:
         try:
-            test_fn()
+            fn()
         except AssertionError as e:
-            print(f"[FAIL] {test_fn.__name__}: {e}")
-            errors.append(test_fn.__name__)
+            print(f"[FAIL] {fn.__name__}: {e}")
+            errors.append(fn.__name__)
         except Exception as e:
-            print(f"[ERROR] {test_fn.__name__}: {e}")
-            errors.append(test_fn.__name__)
-
+            import traceback; traceback.print_exc()
+            print(f"[ERROR] {fn.__name__}: {e}")
+            errors.append(fn.__name__)
     print()
     if errors:
-        print(f"FAILED: {len(errors)} test(s): {errors}")
+        print(f"FAILED: {errors}")
         sys.exit(1)
     else:
-        print(f"ALL TESTS PASSED ({len(tests)} tests)")
+        print(f"ALL {len(tests)} TESTS PASSED")

@@ -1,2 +1,18 @@
 .env
-D:\Code\orchestrate\aug26\hackerrank-orchestrate-august26\dataset
+dataset/
+output_checkpoint.json
+eval_checkpoint.json
+media_debug.json
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+# Operating system files
+.DS_Store
+Thumbs.db
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo

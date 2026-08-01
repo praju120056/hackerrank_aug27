@@ -1,189 +1,323 @@
 """
 llm_router.py
 -------------
-Decision Engine: batch Gemini Flash calls for message routing.
+Decision Engine: batched Gemini calls for message routing.
 
-- Batches 5 messages per API call
-- Sleeps 4 seconds between batches (free-tier: 15 RPM, 1500 RPD)
-- Exponential backoff on rate-limit errors (max 3 retries)
-- Falls back to digest/0.5/none on JSON parse failure
-- Clamps final confidence to [0.55, 0.95]
+Key improvements over v1:
+- Uses gemini-2.0-flash-lite (30 RPM free tier) by default
+- Parses RetryInfo from 429 errors to use the API-suggested retry delay
+- Configurable batch size (default 10) and inter-batch sleep (default 8 s)
+- Checkpoint/resume: partial results are saved to disk after every batch
+- Compact system prompt (no per-call few-shot block) reduces token usage
+- Validates and repairs every LLM response before accepting it
+- Raises KeyboardInterrupt gracefully by saving checkpoint before exit
 """
 
 from __future__ import annotations
 import json
-import time
 import os
 import re
+import time
+from pathlib import Path
 
-BATCH_SIZE = 5
-SLEEP_BETWEEN_BATCHES = 4  # seconds
-MAX_RETRIES = 3
-
-VALID_ACTIONS = {"notify", "digest", "mute"}
-VALID_TYPES = {
-    "personal", "urgent", "event", "payment", "business_update",
-    "promotion", "greeting", "forward", "spam", "scam", "unknown",
-}
-
-CONF_MIN = 0.55
-CONF_MAX = 0.95
+from models import (
+    RoutingPrediction,
+    VALID_ACTIONS,
+    VALID_MESSAGE_TYPES,
+    CONF_MIN,
+    CONF_MAX,
+)
 
 
-# ── System Prompt ─────────────────────────────────────────────────────────────
+# ── System prompt ─────────────────────────────────────────────────────────────
+# Kept short to minimise tokens consumed per call.
+# Few-shot examples are loaded from disk once at import time.
 
-SYSTEM_PROMPT = """You are a WhatsApp notification routing system. Your job is to decide, for each incoming message, whether to notify the user immediately, digest it for later, or mute it.
+_SYSTEM_PROMPT = """\
+You are a WhatsApp notification routing engine.
 
-ROUTING RULES:
-- notify: message is urgent, time-sensitive, personally relevant, or requires immediate action
-- digest: message is useful or safe but can wait; no urgent action needed
-- mute: low-value, repetitive, unwanted, promotional (opted-out), suspicious, or unsafe
+For each incoming message you receive, decide the routing action.
 
-ALLOWED action values: notify, digest, mute
-ALLOWED message_type values: personal, urgent, event, payment, business_update, promotion, greeting, forward, spam, scam, unknown
+ACTIONS:
+- notify  -> message is urgent, time-sensitive, personally relevant, or requires immediate action
+- digest  -> message is useful or safe but can wait; no urgent action needed
+- mute    -> low-value, repetitive, unwanted, promotional (opted-out), suspicious, or unsafe
 
-PERSONALIZATION: Use the user context, group context, business context, preference_signals, and evidence to make a decision personalized to this specific user. The same message may be notify for one user and mute for another.
+MESSAGE TYPES (pick the single best fit):
+personal | urgent | event | payment | business_update | promotion | greeting | forward | spam | scam | unknown
 
-PREFERENCE SIGNALS: The priority_bias and reason_hint are pre-computed behavioral signals. Use them to inform your decision but do not be bound by them — a biased message can still be notify if the content is genuinely urgent.
+PERSONALIZATION:
+Use all provided context fields. The same message text may warrant different actions for different users based on their history, relationship, and preferences.
 
-CONFIDENCE CALIBRATION:
-- Start with your raw confidence (0.0–1.0)
-- Add priority_bias from the context (may be negative)
-- Clamp final value between 0.55 and 0.95
-- Higher confidence = clearer signal; use 0.75–0.85 for most decisions
+PREFERENCE SIGNALS:
+priority_bias is a pre-computed float (negative = lower priority). reason_hint explains why.
+These inform your decision but do NOT override it — urgent content can still be notify even with a negative bias.
 
-EVIDENCE: If you used historical messages in your reasoning, list their message_ids semicolon-separated. Otherwise write "none".
+CONFIDENCE:
+Assign your raw confidence (0.0–1.0). The pipeline will apply priority_bias and clamp.
 
-OUTPUT FORMAT: Return a JSON array. One object per message. Exactly these fields:
+EVIDENCE:
+If historical messages informed your decision, list their IDs (semicolon-separated). Otherwise write "none".
+
+OUTPUT FORMAT:
+Return a JSON array only. No markdown, no prose. Exactly one object per message_id provided.
+
 [
   {
-    "message_id": "msg_xxx",
+    "message_id": "...",
     "action": "notify|digest|mute",
     "message_type": "...",
-    "reason": "One sentence. Match the style of the examples below.",
+    "reason": "One concise sentence explaining the decision.",
     "confidence": 0.00,
-    "evidence_message_ids": "message_0001;message_0002 or none"
+    "evidence_message_ids": "message_001;message_002 or none"
   }
-]
-
-Do not include any text outside the JSON array."""
+]"""
 
 
-def _load_few_shot_examples() -> str:
-    """Load few-shot examples from prompts/few_shot_examples.txt."""
-    this_dir = os.path.dirname(os.path.abspath(__file__))
-    path = os.path.join(this_dir, "prompts", "few_shot_examples.txt")
-    if not os.path.exists(path):
+# ── Few-shot examples ─────────────────────────────────────────────────────────
+
+def _load_few_shot() -> str:
+    this_dir = Path(__file__).parent
+    path = this_dir / "prompts" / "few_shot_examples.txt"
+    if not path.exists():
         return ""
-    with open(path, encoding="utf-8") as f:
-        raw = f.read().strip()
     return (
-        "\n\nLABELLED EXAMPLES (do not route these, use them to learn the style and calibration):\n\n"
-        + raw
+        "\n\nLABELLED EXAMPLES — learn style and calibration, do NOT route these:\n\n"
+        + path.read_text(encoding="utf-8").strip()
     )
 
 
-FEW_SHOT_BLOCK = _load_few_shot_examples()
-FULL_SYSTEM_PROMPT = SYSTEM_PROMPT + FEW_SHOT_BLOCK
+_FEW_SHOT = _load_few_shot()
+_FULL_SYSTEM = _SYSTEM_PROMPT + _FEW_SHOT
 
 
-# ── Public class ──────────────────────────────────────────────────────────────
+# ── RetryInfo parser ──────────────────────────────────────────────────────────
+
+def _extract_retry_seconds(exc: Exception, default: int = 65) -> int:
+    """
+    Parse the retryDelay field from a Gemini 429 RetryInfo response.
+    Returns delay_seconds + 5s buffer, or `default` if not found.
+
+    The error details contain something like:
+        {'@type': '.../RetryInfo', 'retryDelay': '32s'}
+    """
+    try:
+        text = str(exc)
+        # Try both quote styles: 'retryDelay': '32s' and "retryDelay": "32s"
+        for pattern in (
+            r"['\"]retryDelay['\"]\s*:\s*['\"](\d+)s['\"]",
+            r"retry in\s+(\d+(?:\.\d+)?)s",
+        ):
+            m = re.search(pattern, text, re.IGNORECASE)
+            if m:
+                return int(float(m.group(1))) + 5
+    except Exception:
+        pass
+    return default
+
+
+def _is_rate_limit(exc: Exception) -> bool:
+    s = str(exc).lower()
+    return "429" in s or "quota" in s or "resource_exhausted" in s or "rate" in s
+
+
+# ── Output validation & repair ────────────────────────────────────────────────
+
+def _validate_and_repair(item: dict, ctx: dict) -> RoutingPrediction:
+    """
+    Validate one parsed LLM response object against the output contract.
+    Repairs invalid enum values (action -> digest, message_type -> unknown).
+    Applies priority_bias and clamps confidence.
+    """
+    mid = str(item.get("message_id", ctx["message_id"]))
+
+    action = str(item.get("action", "digest")).strip().lower()
+    if action not in VALID_ACTIONS:
+        action = "digest"
+
+    mtype = str(item.get("message_type", "unknown")).strip().lower()
+    if mtype not in VALID_MESSAGE_TYPES:
+        mtype = "unknown"
+
+    reason = str(item.get("reason", "Routing decision."))[:300].strip()
+    if not reason:
+        reason = "Routing decision."
+
+    # Confidence: parse, apply bias, clamp
+    raw_conf = float(item.get("confidence", 0.7))
+    bias = float((ctx.get("preference_signals") or {}).get("priority_bias", 0.0))
+    conf = max(CONF_MIN, min(CONF_MAX, raw_conf + bias))
+
+    eids = str(item.get("evidence_message_ids", "none")).strip()
+    if not eids:
+        eids = "none"
+
+    return RoutingPrediction(
+        message_id=mid,
+        action=action,
+        message_type=mtype,
+        reason=reason,
+        confidence=round(conf, 3),
+        evidence_message_ids=eids,
+        rule_fired=False,
+    )
+
+
+def _fallback(ctx: dict) -> RoutingPrediction:
+    return RoutingPrediction(
+        message_id=ctx["message_id"],
+        action="digest",
+        message_type="unknown",
+        reason="Routing fallback: unable to obtain a valid LLM decision.",
+        confidence=0.5,
+        evidence_message_ids="none",
+        rule_fired=False,
+    )
+
+
+# ── JSON extraction ───────────────────────────────────────────────────────────
+
+def _extract_json_array(text: str) -> str:
+    text = re.sub(r"```(?:json)?\s*", "", text).replace("```", "").strip()
+    start = text.find("[")
+    end = text.rfind("]")
+    if start != -1 and end > start:
+        return text[start : end + 1]
+    return text
+
+
+# ── Main router class ─────────────────────────────────────────────────────────
 
 class LLMRouter:
     """
-    Usage:
-        router = LLMRouter(client, model_name="gemini-2.0-flash-001")
-        results = router.route_batch(contexts)  # list of ctx dicts
+    Routes all messages through Gemini in batches with automatic rate-limit handling.
+
+    Configuration (all overridable via env vars, but constructor params take priority):
+        model_name          Gemini model ID
+        batch_size          Messages per API call (default 10)
+        sleep_between_batch Seconds to sleep between batches (default 8)
+        max_retries         Per-batch retry attempts on rate-limit errors (default 5)
+        checkpoint_path     Where to save/resume partial results (or None to disable)
     """
 
-    def __init__(self, client, model_name: str = "gemini-2.0-flash-001"):
-        self.client = client
-        self.model_name = model_name
+    def __init__(
+        self,
+        client,
+        model_name: str,
+        batch_size: int = 10,
+        sleep_between_batch: float = 8.0,
+        max_retries: int = 5,
+        checkpoint_path: Path | None = None,
+    ):
+        self._client = client
+        self._model = model_name
+        self._batch_size = batch_size
+        self._sleep = sleep_between_batch
+        self._max_retries = max_retries
+        self._checkpoint_path = checkpoint_path
 
-    def route_all(self, contexts: list[dict]) -> list[dict]:
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def route_all(self, contexts: list[dict]) -> list[RoutingPrediction]:
         """
-        Route all contexts in batches. Returns a list of result dicts in the
-        same order as contexts.
+        Route all context dicts in batches.
+        Returns a list of RoutingPrediction objects in the same order.
+        Falls back per-batch on unrecoverable errors.
+        Saves a checkpoint after every batch.
         """
-        results: list[dict] = []
+        # Load checkpoint to resume partial runs
+        completed: dict[str, RoutingPrediction] = self._load_checkpoint()
+        if completed:
+            print(f"[LLM] Resuming from checkpoint ({len(completed)} already done)")
+
+        # Filter out already-completed messages
+        pending = [c for c in contexts if c["message_id"] not in completed]
         batches = [
-            contexts[i: i + BATCH_SIZE]
-            for i in range(0, len(contexts), BATCH_SIZE)
+            pending[i : i + self._batch_size]
+            for i in range(0, len(pending), self._batch_size)
         ]
 
-        for batch_idx, batch in enumerate(batches):
-            if batch_idx > 0:
-                print(f"  [LLM] Sleeping {SLEEP_BETWEEN_BATCHES}s between batches…")
-                time.sleep(SLEEP_BETWEEN_BATCHES)
+        total = len(batches)
+        try:
+            for i, batch in enumerate(batches):
+                if i > 0:
+                    print(f"  [LLM] Sleeping {self._sleep}s …")
+                    time.sleep(self._sleep)
 
-            print(
-                f"  [LLM] Batch {batch_idx + 1}/{len(batches)} "
-                f"({len(batch)} messages)…"
-            )
-            batch_results = self._route_batch_with_retry(batch)
-            results.extend(batch_results)
+                print(f"  [LLM] Batch {i + 1}/{total} ({len(batch)} messages) …")
+                results = self._route_batch(batch)
+                for pred in results:
+                    completed[pred.message_id] = pred
+                self._save_checkpoint(completed)
+        except KeyboardInterrupt:
+            print("\n[LLM] Interrupted — checkpoint saved. Re-run to resume.")
+            raise
 
-        return results
+        # Reconstruct in original order
+        ordered: list[RoutingPrediction] = []
+        for ctx in contexts:
+            mid = ctx["message_id"]
+            ordered.append(completed.get(mid) or _fallback(ctx))
+        return ordered
 
     # ------------------------------------------------------------------
-    # Internals
+    # Batch routing with retry
     # ------------------------------------------------------------------
 
-    def _route_batch_with_retry(self, batch: list[dict]) -> list[dict]:
-        """Attempt batch routing with exponential backoff on rate-limit errors."""
+    def _route_batch(self, batch: list[dict]) -> list[RoutingPrediction]:
+        """Send one batch to Gemini, retry on rate-limit errors using RetryInfo delay."""
         from google.genai import types
 
-        user_prompt = self._build_user_prompt(batch)
-        msg_ids = [ctx["message_id"] for ctx in batch]
+        user_prompt = self._build_prompt(batch)
 
-        for attempt in range(MAX_RETRIES + 1):
+        for attempt in range(self._max_retries + 1):
             try:
-                response = self.client.models.generate_content(
-                    model=self.model_name,
+                response = self._client.models.generate_content(
+                    model=self._model,
                     contents=[user_prompt],
                     config=types.GenerateContentConfig(
-                        system_instruction=FULL_SYSTEM_PROMPT,
-                        temperature=0.1,
+                        system_instruction=_FULL_SYSTEM,
+                        temperature=0.0,
                         max_output_tokens=2048,
                     ),
                 )
-                raw_text = response.text or ""
-                parsed = self._parse_response(raw_text, batch)
-                return parsed
+                raw = response.text or ""
+                return self._parse_response(raw, batch)
+
+            except KeyboardInterrupt:
+                raise
 
             except Exception as exc:
-                err_str = str(exc).lower()
-                is_rate_limit = (
-                    "429" in err_str
-                    or "quota" in err_str
-                    or "rate" in err_str
-                    or "resource" in err_str
-                )
-                if is_rate_limit and attempt < MAX_RETRIES:
-                    wait = (2 ** attempt) * 10  # 10s, 20s, 40s
+                if _is_rate_limit(exc) and attempt < self._max_retries:
+                    delay = _extract_retry_seconds(exc)
                     print(
-                        f"  [LLM] Rate limit hit (attempt {attempt + 1}), "
-                        f"waiting {wait}s…"
+                        f"  [LLM] Rate-limit (attempt {attempt + 1}/{self._max_retries}), "
+                        f"retrying in {delay}s …"
                     )
-                    time.sleep(wait)
+                    time.sleep(delay)
                     continue
-                else:
-                    print(f"  [LLM] Error (attempt {attempt + 1}): {exc}")
-                    break
 
-        # Fallback for all messages in this batch
-        return [self._fallback(ctx) for ctx in batch]
+                # Non-rate-limit error or retries exhausted
+                print(f"  [LLM] Failed after {attempt + 1} attempt(s): {exc}")
+                break
 
-    def _build_user_prompt(self, batch: list[dict]) -> str:
-        """Serialise the batch of context dicts into a compact JSON prompt."""
+        return [_fallback(ctx) for ctx in batch]
+
+    # ------------------------------------------------------------------
+    # Prompt construction
+    # ------------------------------------------------------------------
+
+    def _build_prompt(self, batch: list[dict]) -> str:
+        """Serialise the batch as a compact JSON array for the user message."""
         items = []
         for ctx in batch:
-            # Strip heavy fields that bloat the prompt but are redundant
-            compact = {
-                "message_id": ctx.get("message_id"),
-                "message_text": (ctx.get("message_text") or "")[:800],
+            items.append({
+                "message_id": ctx["message_id"],
+                "text": ctx.get("text", "")[:600],
                 "media_type": ctx.get("media_type", ""),
-                "media_summary": ctx.get("media_summary", ""),
+                "media": ctx.get("media"),
                 "conversation_type": ctx.get("conversation_type"),
                 "forwarded_count": ctx.get("forwarded_count", 0),
                 "created_at": ctx.get("created_at", ""),
@@ -193,106 +327,86 @@ class LLMRouter:
                 "preference_signals": ctx.get("preference_signals"),
                 "evidence": ctx.get("evidence", []),
                 "fatigue": ctx.get("fatigue"),
-            }
-            items.append(compact)
-
+            })
         return (
-            "Route each of these messages. Return ONLY a JSON array:\n\n"
-            + json.dumps(items, ensure_ascii=False, indent=2)
+            "Route each message. Return ONLY a JSON array:\n\n"
+            + json.dumps(items, ensure_ascii=False, separators=(",", ":"))
         )
 
-    def _parse_response(self, raw: str, batch: list[dict]) -> list[dict]:
-        """Parse the LLM JSON array response. Falls back per-message on errors."""
-        # Extract JSON array from response (strip markdown fences if present)
+    # ------------------------------------------------------------------
+    # Response parsing
+    # ------------------------------------------------------------------
+
+    def _parse_response(self, raw: str, batch: list[dict]) -> list[RoutingPrediction]:
+        """Parse and validate the JSON array response from Gemini."""
         json_str = _extract_json_array(raw)
-
         try:
-            parsed_list = json.loads(json_str)
-        except Exception as exc:
-            print(f"  [LLM] JSON parse failed: {exc}. Falling back to all digest.")
-            return [self._fallback(ctx) for ctx in batch]
+            parsed = json.loads(json_str)
+        except json.JSONDecodeError as exc:
+            print(f"  [LLM] JSON parse error: {exc}")
+            return [_fallback(ctx) for ctx in batch]
 
-        if not isinstance(parsed_list, list):
-            return [self._fallback(ctx) for ctx in batch]
+        if not isinstance(parsed, list):
+            print("  [LLM] Response is not a list; falling back.")
+            return [_fallback(ctx) for ctx in batch]
 
-        # Build a lookup by message_id
+        # Build lookup by message_id
         result_map: dict[str, dict] = {}
-        for item in parsed_list:
+        for item in parsed:
             mid = item.get("message_id", "")
             if mid:
                 result_map[mid] = item
 
-        results = []
+        results: list[RoutingPrediction] = []
         for ctx in batch:
             mid = ctx["message_id"]
             item = result_map.get(mid)
             if item is None:
-                results.append(self._fallback(ctx))
-                continue
-
-            # Validate and sanitise
-            action = item.get("action", "digest")
-            if action not in VALID_ACTIONS:
-                action = "digest"
-
-            msg_type = item.get("message_type", "unknown")
-            if msg_type not in VALID_TYPES:
-                msg_type = "unknown"
-
-            reason = str(item.get("reason", "Unable to determine routing."))[:300]
-
-            # Confidence: apply priority_bias then clamp
-            raw_conf = _safe_float(item.get("confidence", 0.7))
-            bias = _safe_float(
-                (ctx.get("preference_signals") or {}).get("priority_bias", 0.0)
-            )
-            final_conf = max(CONF_MIN, min(CONF_MAX, raw_conf + bias))
-
-            evidence_ids = str(item.get("evidence_message_ids", "none"))
-
-            results.append(
-                {
-                    "message_id": mid,
-                    "action": action,
-                    "message_type": msg_type,
-                    "reason": reason,
-                    "confidence": round(final_conf, 3),
-                    "evidence_message_ids": evidence_ids,
-                }
-            )
-
+                print(f"  [LLM] No result for {mid}; using fallback.")
+                results.append(_fallback(ctx))
+            else:
+                try:
+                    results.append(_validate_and_repair(item, ctx))
+                except Exception as exc:
+                    print(f"  [LLM] Validation error for {mid}: {exc}; using fallback.")
+                    results.append(_fallback(ctx))
         return results
 
-    def _fallback(self, ctx: dict) -> dict:
-        return {
-            "message_id": ctx["message_id"],
-            "action": "digest",
-            "message_type": "unknown",
-            "reason": "Routing fallback: unable to determine action from available context.",
-            "confidence": 0.5,
-            "evidence_message_ids": "none",
-        }
+    # ------------------------------------------------------------------
+    # Checkpoint helpers
+    # ------------------------------------------------------------------
 
+    def _save_checkpoint(self, completed: dict[str, RoutingPrediction]) -> None:
+        if self._checkpoint_path is None:
+            return
+        try:
+            data = {
+                mid: {
+                    "message_id": p.message_id,
+                    "action": p.action,
+                    "message_type": p.message_type,
+                    "reason": p.reason,
+                    "confidence": p.confidence,
+                    "evidence_message_ids": p.evidence_message_ids,
+                    "rule_fired": p.rule_fired,
+                }
+                for mid, p in completed.items()
+            }
+            self._checkpoint_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception as exc:
+            print(f"  [LLM] Checkpoint save failed: {exc}")
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _extract_json_array(text: str) -> str:
-    """Strip markdown fences and extract the JSON array substring."""
-    # Remove ```json ... ``` or ``` ... ```
-    text = re.sub(r"```(?:json)?\s*", "", text)
-    text = text.replace("```", "")
-    text = text.strip()
-
-    # Find the first '[' and last ']'
-    start = text.find("[")
-    end = text.rfind("]")
-    if start != -1 and end != -1 and end > start:
-        return text[start: end + 1]
-    return text
-
-
-def _safe_float(val, default: float = 0.0) -> float:
-    try:
-        return float(val) if val not in (None, "") else default
-    except (ValueError, TypeError):
-        return default
+    def _load_checkpoint(self) -> dict[str, RoutingPrediction]:
+        if self._checkpoint_path is None or not self._checkpoint_path.exists():
+            return {}
+        try:
+            data = json.loads(self._checkpoint_path.read_text(encoding="utf-8"))
+            return {
+                mid: RoutingPrediction(**row)
+                for mid, row in data.items()
+            }
+        except Exception as exc:
+            print(f"  [LLM] Checkpoint load failed: {exc}")
+            return {}
