@@ -1,16 +1,46 @@
-# HackerRank Orchestrate
+# HackerRank Orchestrate — Message Notification Router
 
-Starter repository for the **HackerRank Orchestrate** 24-hour hackathon.
+AI-powered notification routing engine built for WhatsApp. It determines whether to `notify` the user immediately, group into a `digest` for later, or `mute` low-value/suspicious alerts based on multimodal inputs (text, images, and voice notes) and rich, relational behavioral statistics.
 
-## Message Notification Router
+---
 
-Build an AI-powered system for WhatsApp that decides which messages deserve immediate attention, which should wait, and which should be muted.
+## How It Works (Pipeline Architecture)
 
-The system must reason over multimodal messages, including text messages, image posters/screenshots, and voice notes.
+The system enforces a clean, deterministic-first execution path to guarantee reliability, optimize Gemini API rate limit usage, and scale under strict free-tier quotas:
 
-WhatsApp is noisy. A user can receive family chats, society notices, school updates, co-worker messages, business account promotions, image posters, voice notes, and scams in the same message stream. Treating every message the same creates two bad outcomes: important messages get missed, and unwanted or risky messages interrupt the user.
-
-Read [`problem_statement.md`](./problem_statement.md) for the full task spec, input/output schema, allowed values, and submission format.
+```
+Incoming Message
+      │
+      ▼
+Media understanding ───────→ Deduplicated pre-pass processes every unique image
+(Gemini 3.5)                 or audio exactly once and caches in-memory.
+      │
+      ▼
+Context Building ──────────→ Merges all 12 dataset CSVs into a structured context
+                             object. No raw CSV rows are ever sent to LLM.
+      │
+      ▼
+Rule Engine
+├── Absolute Rules ────────→ Deterministically handles prompt injections, domain mismatches,
+│                            and OTP scams. Skips the LLM entirely on a match.
+└── Preference Signals ────→ Stackable biases (DND, muted group, opt-outs, fatigue ratio)
+                             inject context enrichment biases (clamped to [-0.5, +0.5]).
+      │
+      ▼
+Evidence Retrieval ────────→ Tier-ranked retrieval (sender > group > business) with recency
+                             and engagement scoring to load the top-3 historical interactions.
+      │
+      ▼
+Decision Engine ───────────→ Batches remaining items (10 per call) to Gemini 3.5 Flash Lite
+(Gemini 3.5)                 using strict JSON output. Supports checkpoint save/resume.
+      │
+      ▼
+Output Validation & Calib. → Validates output structure, repairs malformed fields,
+                             applies preference biases to confidence, and clamps to [0.55, 0.95].
+      │
+      ▼
+output.csv
+```
 
 ---
 
@@ -25,134 +55,100 @@ Read [`problem_statement.md`](./problem_statement.md) for the full task spec, in
 ├── .env.example                      # Template for secret config
 ├── output.csv                        # Final predictions (written by main.py)
 ├── code/
-│   ├── main.py                       # Entry point — orchestrates the full pipeline
-│   ├── context_builder.py            # Loads all CSVs, builds per-message context dict
-│   ├── rule_engine.py                # Absolute rules + preference signals
-│   ├── evidence.py                   # Key-match retrieval from message_history
-│   ├── media_processor.py            # Gemini inline image/audio description
-│   ├── llm_router.py                 # Gemini Flash batching, prompt, JSON parse
+│   ├── main.py                       # Pipeline Orchestrator (entry point)
+│   ├── models.py                     # Shared dataclasses (MediaSummary, RoutingPrediction)
+│   ├── context_builder.py            # Aggregates users/groups/history CSV records
+│   ├── rule_engine.py                # Enforces absolute bypass rules + stackable preference biases
+│   ├── evidence.py                   # Rank-retrieves top-3 historical messages
+│   ├── media_processor.py            # Gemini 3.5 multimodal analysis & semantic summaries
+│   ├── llm_router.py                 # Batched routing decision driver + checkpointing
+│   ├── evaluation.py                 # Validation suite comparing sample_messages.csv to labels
 │   └── prompts/
-│       └── few_shot_examples.txt     # 30 labelled sample rows for LLM context
+│       └── few_shot_examples.txt     # Labelled JSONL few-shot cases
 ├── tests/
-│   ├── test_output_schema.py         # Validate output.csv schema and row count
-│   ├── test_context_builder.py       # Validate context dict construction
-│   ├── test_rule_engine.py           # Unit tests for all rules and signals
-│   ├── test_evidence.py              # Evidence retrieval tests
-│   └── test_llm_parser.py            # LLM JSON parsing + confidence clamping
+│   ├── test_output_schema.py         # Validates schema structure of final output.csv
+│   ├── test_context_builder.py       # Validates context dict construction & DND checks
+│   ├── test_rule_engine.py           # Evaluates stackable signals and absolute rules
+│   ├── test_evidence.py              # Evaluates tier-based historical retrieval
+│   └── test_llm_parser.py            # Verifies JSON cleaning, repairing, and retrying
 └── dataset/
-    ├── messages.csv                  # Messages to route
-    ├── output.csv                    # Blank submission template
-    ├── sample_messages.csv           # Solved examples
-    ├── users.csv                     # User notification behavior
-    ├── groups.csv                    # Group metadata
-    ├── group_members.csv             # User-group relationships
-    ├── business_accounts.csv         # Business sender metadata
-    ├── user_business_history.csv     # User-business history
-    ├── message_history.csv           # Historical messages
-    ├── message_events.csv            # User reactions to historical messages
-    ├── images.csv                    # Image IDs and media file paths
-    ├── voice_notes.csv               # Voice note IDs and media file paths
-    ├── daily_notification_summary.csv
-    └── media/
-        ├── images/
-        └── audio/
+    ├── messages.csv                  # Incoming messages to route
+    └── media/                        # Multimodal raw images and audio files
 ```
 
 ---
 
-## Setup and Run
+## Setup and Quick Start
 
-### 1. Install dependencies
-
+### 1. Install Dependencies
+Run under **Python 3.10+**:
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Configure your Gemini API key
-
-```bash
-cp .env.example .env
-# Open .env and replace "your_key_here" with your real GEMINI_API_KEY
+### 2. Configure Credentials
+Copy `.env.example` to `.env` and fill in your Gemini API key:
+```env
+GEMINI_API_KEY=your_gemini_api_key_here
+ROUTING_MODEL=gemini-3.5-flash-lite
+MEDIA_MODEL=gemini-3.5-flash-lite
 ```
 
-### 3. Run the pipeline
-
+### 3. Run Pipeline Inference
 ```bash
 python code/main.py
 ```
-
-`output.csv` will be written to the repo root with exactly 110 rows (one per message).
+This executes the pipeline end-to-end for all 110 messages in `dataset/messages.csv` and outputs `output.csv`. It supports **checkpoint recovery**: if interrupted, re-running will resume processing from the last successfully written batch.
 
 ---
 
-## Run Tests (no API key needed for tests 2-5)
+## Advanced Verification and Debug Modes
 
+### Run Unit Tests (Offline / No Key Needed)
+Our 50-test suite runs locally without hitting the Gemini API:
 ```bash
-python tests/test_rule_engine.py      # Rule engine unit tests
-python tests/test_context_builder.py  # Context builder validation
-python tests/test_evidence.py         # Evidence retrieval tests
-python tests/test_llm_parser.py       # LLM parser + confidence clamping
-python tests/test_output_schema.py    # Output CSV schema validation (run after main.py)
+python tests/test_rule_engine.py
+python tests/test_context_builder.py
+python tests/test_evidence.py
+python tests/test_llm_parser.py
 ```
-5. Evaluate your approach on the solved sample rows before submitting.
 
-You may use any language or runtime. Python, JavaScript, and TypeScript are all reasonable choices.
+### Run Evaluation Script (Requires API Key)
+Executes inference on the solved `dataset/sample_messages.csv` (stripping answers during inference) and reports accuracy, confusion matrices, and detailed prediction mismatches:
+```bash
+python code/evaluation.py
+```
 
----
+### Enable Media Debug Mode (`DEBUG_MEDIA=true`)
+To audit what semantic summaries Gemini is generating for your images and voice notes, set `DEBUG_MEDIA=true` in your environment before running `main.py` or `evaluation.py`:
+```bash
+# Windows PowerShell
+$env:DEBUG_MEDIA="true"
+python code/main.py
 
-## Requirements
+# Windows Command Prompt
+set DEBUG_MEDIA=true
+python code/main.py
 
-Your solution must:
-
-- be runnable from the terminal
-- read the provided files from `dataset/`
-- produce a valid `output.csv`
-- include one prediction for every `message_id` in `dataset/messages.csv`
-- not use organizer-only files or hardcoded labels
-
-If you use API keys or secrets, read them from environment variables. Never hardcode secrets in the repo.
-
----
-
-## Evaluation
-
-Your `output.csv` will be compared against hidden ground-truth labels.
-
-The scoring will consider:
-
-- correctness of `action`
-- correctness of `message_type`
-- usefulness and consistency of `reason`
-- whether `evidence_message_ids` point to relevant historical messages
-- reasonable confidence calibration
-
-Strong systems will combine retrieval, structured metadata, behavioral history, safety checks, OCR/ASR handling, and contextual reasoning.
+# Linux/macOS
+DEBUG_MEDIA=true python code/main.py
+```
+This processes all unique media and writes a clean JSON audit log named `media_debug.json` containing:
+```json
+{
+  "media_id": "vn_008",
+  "media_type": "voice",
+  "summary": "A notification regarding a bank account block and requesting an OTP for immediate verification.",
+  "category": "urgent",
+  "urgency": "high"
+}
+```
 
 ---
 
-## Chat Transcript Logging
+## Submission Checklist
 
-This repo includes an [`AGENTS.md`](./AGENTS.md) file for AI coding tools. It asks compatible tools to append conversation summaries to:
-
-| Platform | Path |
-|---|---|
-| macOS / Linux | `$HOME/hackerrank_orchestrate_august26/log.txt` |
-| Windows | `%USERPROFILE%\hackerrank_orchestrate_august26\log.txt` |
-
-Upload this log as your chat transcript at submission time. Do not paste secrets into the chat.
-
----
-
-## Submission
-
-Submit the following files as instructed by HackerRank:
-
-1. **Code zip**: full runnable solution, prompts/configs, README, and any evaluation files.
-2. **Predictions CSV**: final `output.csv` for all rows in `dataset/messages.csv`.
-3. **Chat transcript**: the `log.txt` described above.
-
-Before submitting, confirm:
-
-- `output.csv` has one row per row in `dataset/messages.csv`.
-- `output.csv` has the exact required columns in the exact required order.
-- Your runnable code and setup instructions are included in `code.zip`.
+Ensure you include the following three files when submitting your solution:
+1. **Code zip** (`code.zip` containing `code/`, `tests/`, `requirements.txt`, `README.md`, etc.).
+2. **Final output** (`output.csv` written in the repository root).
+3. **Chat transcript** (`log.txt` generated automatically by your coding agent in `%USERPROFILE%\hackerrank_orchestrate_august26\log.txt`).
